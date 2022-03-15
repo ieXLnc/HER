@@ -1,5 +1,5 @@
 import numpy as np
-import torch # Torch version :1.9.0+cpu
+import torch
 from torch import nn
 from torch.optim import Adam
 from networks import *
@@ -20,21 +20,14 @@ class DDPGAgent:
             self,
             env,
             env_params,
-            fc1=64, fc2=64, fc3=64,
-            gamma=0.95, tau=0.01,
-            actor_lr=0.01, critic_lr=0.001,
-            batch_size=64,
-            noise=None,
-            noise_std=0.3,
+            fc1=256, fc2=256, fc3=256,
+            gamma=0.98, tau=0.95,
+            actor_lr=0.001, critic_lr=0.001,
+            batch_size=128,
+            clip_range=5
     ):
 
         self.env = env
-        self.n_obs = get_obs_shape(self.env.observation_space)["observation"][0]
-        self.n_obs_g = get_obs_shape(self.env.observation_space)["desired_goal"][0]
-        self.n_obs_ag = get_obs_shape(self.env.observation_space)["achieved_goal"][0]
-        self.n_acts = env.action_space.shape[0]
-        self.low = self.env.action_space.low
-        self.high = self.env.action_space.high
         self.env_params = env_params
 
         # hyperparams
@@ -43,22 +36,25 @@ class DDPGAgent:
         self.critic_lr = critic_lr
         self.action_l2 = 1
         self.tau = tau
-        self.min = -np.inf
-        self.max = np.inf
-        self.learning_steps = 1000
+        self.clip_range = clip_range
+        self.clip_ratio = 200
 
         # Create the networks
         self.fc1 = fc1
         self.fc2 = fc2
         self.fc3 = fc3
 
-        self.actor = Actor(self.n_obs + self.n_obs_g, self.fc1, self.fc2, self.fc3, self.n_acts).to(device)
-        self.actor_target = Actor(self.n_obs + self.n_obs_g, self.fc1, self.fc2, self.fc3, self.n_acts).to(device)
+        self.actor = Actor(self.env_params['obs'] + self.env_params['goal'], self.fc1, self.fc2, self.fc3, self.env_params['action']).to(device)
+        self.actor_target = Actor(self.env_params['obs'] + self.env_params['goal'], self.fc1, self.fc2, self.fc3, self.env_params['action']).to(device)
         self.actor_optimizer = Adam(self.actor.parameters(), lr=self.actor_lr)
 
-        self.critic = Critic(self.n_obs + self.n_obs_g, self.n_acts, self.fc1, self.fc2, self.fc3).to(device)
-        self.critic_target = Critic(self.n_obs + self.n_obs_g, self.n_acts, self.fc1, self.fc2, self.fc3).to(device)
+        self.critic = Critic(self.env_params['obs'] + self.env_params['goal'], self.env_params['action'], self.fc1, self.fc2, self.fc3).to(device)
+        self.critic_target = Critic(self.env_params['obs'] + self.env_params['goal'], self.env_params['action'], self.fc1, self.fc2, self.fc3).to(device)
         self.critic_optimizer = Adam(self.critic.parameters(), lr=self.critic_lr)
+
+        # normalizer
+        self.o_norm = normalizer(size=env_params['obs'], default_clip_range=self.clip_range)
+        self.g_norm = normalizer(size=env_params['goal'], default_clip_range=self.clip_range)
 
         # setup weights
         for target_params, params in zip(self.actor_target.parameters(), self.actor.parameters()):
@@ -83,31 +79,35 @@ class DDPGAgent:
         self.test_rollout = 5
 
         # Noise
-        self.noise_type = noise
-        self.noise_std = noise_std
-        if self.noise_type is not None:
-            if self.noise_type == 'ou':
-                self.OU_noise = OUNoise(self.env.action_space, max_sigma=self.noise_std)
-                print('Ou noise used')
+        self.noise_eps = 0.2        # add noise with 0.2
+        self.random_eps = 0.1       # choose action over eps
 
         # saving modalities
         self.name_env = env.unwrapped.spec.id
-        self.name = self.name_env + '_model_' + str(self.noise_type) + '_' + str(self.noise_std) + '_normalize_' \
-                    + '.pth'
+        self.name = self.name_env + '_model' + '.pth'
 
         # Create log
         self.log = {
-            'rewards': [],
-            'rewards_ep': -np.inf,
-            'mean_rewards': [],
-            'best_score': [],
+            'success': [],
             'actor_loss': [0],
             'critic_loss': [0],
-            'episode': 0,
+            'epoch': [],
             'batch_size': self.batch_size,
-            'test_rew': [],
-            'timesteps': 0
         }
+
+    def preprocess(self, observation, goal):
+        # normalize when created the norm pipe
+        obs_norm = self.o_norm.normalize(observation)
+        g_norm = self.g_norm.normalize(goal)
+        # concat
+        input_obs = np.concatenate([obs_norm, g_norm])
+        input_obs_t = torch.tensor(input_obs, dtype=torch.float)
+        return input_obs_t
+
+    def clip_input(self, obs, g):
+        obs = np.clip(obs, -self.clip_ratio, self.clip_ratio)
+        g = np.clip(g, -self.clip_ratio, self.clip_ratio)
+        return obs, g
 
     def get_action(self, input):
         # print(input, input.shape)
@@ -115,10 +115,16 @@ class DDPGAgent:
             input = torch.FloatTensor(input).to(device)
 
         action = self.actor(input).detach().cpu().numpy()
-
-        # implement gaussian noise and clip here
-
-        return np.clip(action, self.low, self.high)
+        #
+        # # add the gaussian
+        # action += self.noise_eps * self.env_params['action_max'] * np.random.randn(*action.shape)
+        # action = np.clip(action, -self.env_params['action_max'], self.env_params['action_max'])
+        # # random actions...
+        # random_actions = np.random.uniform(low=-self.env_params['action_max'], high=self.env_params['action_max'], \
+        #                                     size=self.env_params['action'])
+        # # choose if use the random actions
+        # action += np.random.binomial(1, self.random_eps, 1)[0] * (random_actions - action)
+        return action
 
     def update_models(self):
 
@@ -127,16 +133,17 @@ class DDPGAgent:
         # print('transition:', transitions)
         # print('keys:', transitions.keys())      # 'obs', 'ag', 'g', 'actions', 'obs_next', 'ag_next', 'r'
         # get values out of transitions
-        obs = transitions['obs']
-        obs_next = transitions['obs_next']
-        g = transitions['g']
+        obs, obs_next, g = transitions['obs'], transitions['obs_next'], transitions['g']    # get the vals out to clip
+        transitions['obs'], transitions['g'] = self.clip_input(obs, g)
+        transitions['obs_next'], transitions['g_next'] = self.clip_input(obs_next, g)
+        # normalize the vals and concat
+        obs_norm = self.o_norm.normalize(transitions['obs'])
+        g_norm = self.g_norm.normalize(transitions['g'])
+        input = np.concatenate([obs_norm, g_norm], axis=1)
 
-        # clips the vals ??
-        # normalize the vals
-
-        # concat obs + goals for input
-        input = np.concatenate([obs, g], axis=1)
-        input_next = np.concatenate([obs_next, g], axis=1)
+        obs_next_norm = self.o_norm.normalize(transitions['obs_next'])
+        g_next_norm = self.g_norm.normalize(transitions['g_next'])
+        input_next = np.concatenate([obs_next_norm, g_next_norm], axis=1)
         # tensor those + r and actions
         input_t = torch.tensor(input, dtype=torch.float)
         input_next_t = torch.tensor(input_next, dtype=torch.float)
@@ -179,12 +186,37 @@ class DDPGAgent:
         for target_params, params in zip(target_net.parameters(), net.parameters()):
             target_params.data.copy_(self.tau * params.data + (1.0 - self.tau) * target_params.data)
 
+    # update the normalizer
+    def _update_normalizer(self, episode_batch):
+        mb_obs, mb_ag, mb_g, mb_actions = episode_batch
+        mb_obs_next = mb_obs[:, 1:, :]
+        mb_ag_next = mb_ag[:, 1:, :]
+        # get the number of normalization transitions
+        num_transitions = mb_actions.shape[1]
+        # create the new buffer to store them
+        buffer_temp = {'obs': mb_obs,
+                       'ag': mb_ag,
+                       'g': mb_g,
+                       'actions': mb_actions,
+                       'obs_next': mb_obs_next,
+                       'ag_next': mb_ag_next,
+                       }
+        transitions = self.her_sample.sample_her_transition(buffer_temp, num_transitions)
+        obs, g = transitions['obs'], transitions['g']
+        # pre process the obs and g
+        transitions['obs'], transitions['g'] = self.clip_input(obs, g)
+        # update
+        self.o_norm.update(transitions['obs'])
+        self.g_norm.update(transitions['g'])
+        # recompute the stats
+        self.o_norm.recompute_stats()
+        self.g_norm.recompute_stats()
+
     def save_models(self):
         torch.save(self.actor.state_dict(), './Models/' + 'actor_' + self.name)
         torch.save(self.actor_target.state_dict(), './Models/' + 'actor_target_' + self.name)
         torch.save(self.critic.state_dict(), './Models/' + 'critic_' + self.name)
         torch.save(self.critic_target.state_dict(), './Models/' + 'critic_target_' + self.name)
-        # self.replay_buffer.save_memory(self.name)
 
     def train(self):
 
@@ -238,6 +270,7 @@ class DDPGAgent:
 
                 # store cycle
                 self.replay_buffer.store_episode([mb_obs, mb_ag, mb_g, mb_act])
+                self._update_normalizer([mb_obs, mb_ag, mb_g, mb_act])
                 # self.update norm
 
                 for _ in range(self.n_update):
@@ -247,13 +280,19 @@ class DDPGAgent:
                 self.soft_update(self.critic_target, self.critic)
 
             mean_success = self.eval_agent()
-            print(f'Mean success of epoch {epoch}: {mean_success}')
-
-    def preprocess(self, observation, goal):
-        # normalize when created the norm pipe
-        # concat
-        input_obs = np.concatenate([observation, goal])
-        return input_obs
+            self.log['success'].append(mean_success)
+            self.log['epoch'].append(epoch)
+            self.summary()
+            if mean_success > 0.8:
+                self.save_models()
+                with open('./Models/logger_' + self.name + '.pkl', 'wb') as handle:
+                    pickle.dump(self.log, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            if epoch >= self.n_epochs - 1:
+                self.save_models()
+                with open('./Models/logger_' + self.name + '.pkl', 'wb') as handle:
+                    pickle.dump(self.log, handle, protocol=pickle.HIGHEST_PROTOCOL)
+                plt.plot(self.log['success'])
+                plt.savefig('./Plots/plot_success_fetch.png')
 
     def eval_agent(self, render=False, n_test=1):
         total_success = []
@@ -263,8 +302,9 @@ class DDPGAgent:
             obs = observation['observation']
             g = observation['desired_goal']
             for _ in range(self.env_params['max_timesteps']):
-                input = np.concatenate([obs, g])
-                input_t = torch.tensor(input, dtype=torch.float)
+                if render:
+                    self.env.render()
+                input_t = self.preprocess(obs, g)
                 action = self.actor(input_t)
                 new_observation, _, _, info = self.env.step(action.detach().numpy())
                 # replace with new vals
@@ -280,40 +320,14 @@ class DDPGAgent:
         return mean_success
 
     def summary(self):
-        # if len(self.log['rewards']) == 0:
-        #     best_current_score = -np.inf
-        # else:
-        #     best_current_score = self.log['rewards'][np.argmax(self.log['rewards'])]
-
-        # last_val = self.log['rewards_ep']
-
-        # self.log['rewards'].append(self.log['rewards_ep'])
-        # self.log['mean_rewards'].append(np.mean(self.log['rewards'][-10:]))
-        # mean_early_stop = np.mean(self.log['test_rew'][-100:])
-
         print(f'-------------------------------------------------')
-        print(f'----------- Episode #{self.log["episode"]}-------------------')
-        print(f'Rewards for the episode: {self.log["rewards_ep"]}')
-        # print(f'Mean value for last 10 {self.log["mean_rewards"][-1]}')
-        # if last_val > best_current_score:
-        #     self.save_models()
-        #     with open('./Models/logger_' + self.name + '.pkl', 'wb') as handle:
-        #         pickle.dump(self.log, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        #     print(f'New models saved with {last_val}')
-        # else:
-        #     print(f'Best model: {best_current_score}')
-
-        # print(f'test rewards: {self.log["test_rew"][-1]}')
-       #  print(f'mean early stop is currently: {mean_early_stop}')
+        print(f'----------- Episode #{self.log["epoch"][-1]}-------------------')
+        print(f'Mean success: {self.log["success"][-1]}')
         print(f'Actor loss: {self.log["actor_loss"][-1]}')
         print(f'Critic loss: {self.log["critic_loss"][-1]}')
         print(f'With Batch size of {self.log["batch_size"]}')
-        print(f'Timesteps: {self.log["timesteps"]}')
-
-        # if mean_early_stop > self.early_stop_val or self.log["timesteps"] >= self.early_stop_timesteps:
-        #     self.early_stop = True
-        #     self.save_models()
-        #     with open('./Models/logger_' + self.name + '.pkl', 'wb') as handle:
-        #         pickle.dump(self.log, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        #     print(f'Early stop activated with score {last_val} at episode {self.log["episode"]}')
+        if self.log["epoch"][-1] >= self.n_epochs-1:
+            self.save_models()
+            with open('./Models/logger_' + self.name + '.pkl', 'wb') as handle:
+                pickle.dump(self.log, handle, protocol=pickle.HIGHEST_PROTOCOL)
         print(f'-------------------------------------------------')

@@ -1,13 +1,7 @@
 import numpy as np
-from collections import *
-from typing import Dict, Tuple, Union
 import random
-import pickle
 import torch  # Torch version :1.9.0+cpu
 import gym
-from gym import spaces
-from gym_robotics.core import GoalEnv
-import matplotlib.pyplot as plt
 
 np.random.default_rng(14)
 random.seed(14)
@@ -17,58 +11,75 @@ cuda = torch.cuda.is_available()  # check for CUDA
 device = torch.device("cuda" if cuda else "cpu")
 
 
-# Ornstein-Ulhenbeck Process
-# Taken from https://github.com/vitchyr/rlkit/blob/master/rlkit/exploration_strategies/ou_strategy.py
-class OUNoise(object):
-    def __init__(self, action_space, mu=0.0, theta=0.15, max_sigma=0.3, min_sigma=0.3, decay_period=100000):
-        self.mu = mu
-        self.theta = theta
-        self.sigma = max_sigma
-        self.max_sigma = max_sigma
-        self.min_sigma = min_sigma
-        self.decay_period = decay_period
-        self.action_dim = action_space.shape[0]
-        self.low = action_space.low
-        self.high = action_space.high
-        self.reset()
-
-    def reset(self):
-        self.state = np.ones(self.action_dim) * self.mu
-
-    def evolve_state(self):
-        x = self.state
-        dx = self.theta * (self.mu - x) + self.sigma * np.random.randn(self.action_dim)
-        self.state = x + dx
-        return self.state
-
-    def get_action(self, action, t=0):
-        ou_state = self.evolve_state()
-        self.sigma = self.max_sigma - (self.max_sigma - self.min_sigma) * min(1.0, t / self.decay_period)
-        return action + ou_state
+def get_env_params(env):
+    obs = env.reset()
+    # close the environment
+    params = {'obs': obs['observation'].shape[0], 'goal': obs['desired_goal'].shape[0],
+              'action': env.action_space.shape[0], 'action_max': env.action_space.high[0],
+              'max_timesteps': env._max_episode_steps}
+    return params
 
 
-# from stable baseline 3
-def get_obs_shape(
-    observation_space: spaces.Space,
-) -> Union[Tuple[int, ...], Dict[str, Tuple[int, ...]]]:
-    """
-    Get the shape of the observation (useful for the buffers).
-    :param observation_space:
-    :return:
-    """
-    if isinstance(observation_space, spaces.Box):
-        return observation_space.shape
-    elif isinstance(observation_space, spaces.Discrete):
-        # Observation is an int
-        return (1,)
-    elif isinstance(observation_space, spaces.MultiDiscrete):
-        # Number of discrete features
-        return (int(len(observation_space.nvec)),)
-    elif isinstance(observation_space, spaces.MultiBinary):
-        # Number of binary features
-        return (int(observation_space.n),)
-    elif isinstance(observation_space, spaces.Dict):
-        return {key: get_obs_shape(subspace) for (key, subspace) in observation_space.spaces.items()}
+class normalizer:
+    def __init__(self, size, eps=1e-2, default_clip_range=np.inf):
+        self.size = size
+        self.eps = eps
+        self.default_clip_range = default_clip_range
+        # some local information
+        self.local_sum = np.zeros(self.size, np.float32)
+        self.local_sumsq = np.zeros(self.size, np.float32)
+        self.local_count = np.zeros(1, np.float32)
+        # get the total sum sumsq and sum count
+        self.total_sum = np.zeros(self.size, np.float32)
+        self.total_sumsq = np.zeros(self.size, np.float32)
+        self.total_count = np.ones(1, np.float32)
+        # get the mean and std
+        self.mean = np.zeros(self.size, np.float32)
+        self.std = np.ones(self.size, np.float32)
 
-    else:
-        raise NotImplementedError(f"{observation_space} observation space is not supported")
+    # update the parameters of the normalizer
+    def update(self, v):
+        v = v.reshape(-1, self.size)
+        # do the computing
+        self.local_sum += v.sum(axis=0)
+        self.local_sumsq += (np.square(v)).sum(axis=0)
+        self.local_count[0] += v.shape[0]
+
+    # # sync the parameters across the cpus
+    # def sync(self, local_sum, local_sumsq, local_count):
+    #     local_sum[...] = self._mpi_average(local_sum)
+    #     local_sumsq[...] = self._mpi_average(local_sumsq)
+    #     local_count[...] = self._mpi_average(local_count)
+    #     return local_sum, local_sumsq, local_count
+
+    def recompute_stats(self):
+        local_count = self.local_count.copy()
+        local_sum = self.local_sum.copy()
+        local_sumsq = self.local_sumsq.copy()
+        # reset
+        self.local_count[...] = 0
+        self.local_sum[...] = 0
+        self.local_sumsq[...] = 0
+        # synrc the stats
+        # sync_sum, sync_sumsq, sync_count = self.sync(local_sum, local_sumsq, local_count)
+        # update the total stuff
+        self.total_sum += local_sum
+        self.total_sumsq += local_sumsq
+        self.total_count += local_count
+        # calculate the new mean and std
+        self.mean = self.total_sum / self.total_count
+        self.std = np.sqrt(np.maximum(np.square(self.eps), (self.total_sumsq / self.total_count) - np.square(
+            self.total_sum / self.total_count)))
+
+    # # average across the cpu's data
+    # def _mpi_average(self, x):
+    #     buf = np.zeros_like(x)
+    #     MPI.COMM_WORLD.Allreduce(x, buf, op=MPI.SUM)
+    #     buf /= MPI.COMM_WORLD.Get_size()
+    #     return buf
+
+    # normalize the observation
+    def normalize(self, v, clip_range=None):
+        if clip_range is None:
+            clip_range = self.default_clip_range
+        return np.clip((v - self.mean) / (self.std), -clip_range, clip_range)
