@@ -1,9 +1,9 @@
 import numpy as np
+import random
 import torch
 import gym
-from gym_robotics import GoalEnv
+import copy
 from utils import *
-
 
 torch.manual_seed(14)
 # set GPU for faster training
@@ -13,94 +13,128 @@ print("Job will run on {}".format(device))
 
 
 class ReplayBuffer:
-    def __init__(self, env_params, buffer_size, sample_func):
-        self.env_params = env_params
-        self.T = env_params['max_timesteps']            # max timesteps in one ep ?
-        self.size = buffer_size // self.T
-        self.sample_func = sample_func
-        # memory management
-        self.current_size = 0
-        self.n_transitions_stored = 0
-        # create buffer to store info
-        self.buffers = {'obs': np.empty([self.size, self.T + 1, self.env_params['obs']]),
-                        'ag': np.empty([self.size, self.T + 1, self.env_params['goal']]),
-                        'g': np.empty([self.size, self.T, self.env_params['goal']]),
-                        'actions': np.empty([self.size, self.T, self.env_params['action']])
-                        }
+    def __init__(self, size):
+        self.max_size = size
+        self._storage = []
+        self._next_idx = 0
 
-    def store_episode(self, episode_batch):
-        mb_obs, mb_ag, mb_g, mb_action = episode_batch
-        batch_size = mb_obs.shape[0]
+    def add(self, obs, action, reward, obs_tp1, done):
+        data = (obs, action, reward, obs_tp1, done)
+        if self._next_idx >= len(self._storage):
+            self._storage.append(data)
+        else:
+            self._storage[self._next_idx] = data
+        self._next_idx = (self._next_idx + 1) % self.max_size
 
-        idxs = self._get_storage_idx(inc=batch_size)
-        # store info
-        self.buffers['obs'][idxs] = mb_obs
-        self.buffers['ag'][idxs] = mb_ag
-        self.buffers['g'][idxs] = mb_g
-        self.buffers['actions'][idxs] = mb_action
-        self.n_transitions_stored += self.T * batch_size
+    def _return_sample(self, idxes):
+        obses, actions, rewards, obses_tp1, dones = [], [], [], [], []
+        for idx in idxes:
+            data = self._storage[idx]
+            obs, action, reward, obs_tp1, done = data
+            obses.append(np.array(obs))
+            actions.append(np.array(action))
+            rewards.append(reward)
+            obses_tp1.append(np.array(obs_tp1))
+            dones.append(done)
+
+        return obses, actions, rewards, obses_tp1, dones
 
     def sample(self, batch_size):
-        temp_buffer = {}
-        for key in self.buffers.keys():
-            temp_buffer[key] = self.buffers[key][:self.current_size]    # get all current obs
-        temp_buffer['obs_next'] = temp_buffer['obs'][:, 1:, :]
-        temp_buffer['ag_next'] = temp_buffer['ag'][:, 1:, :]
-        # sample transition
-        transitions = self.sample_func(temp_buffer, batch_size)
-        return transitions
-
-    # https://github.com/TianhongDai/hindsight-experience-replay/blob/master/rl_modules/replay_buffer.py
-    def _get_storage_idx(self, inc=None):
-        inc = inc or 1
-        if self.current_size + inc <= self.size:
-            idx = np.arange(self.current_size, self.current_size + inc)
-        elif self.current_size < self.size:
-            overflow = inc - (self.size - self.current_size)
-            idx_a = np.arange(self.current_size, self.size)
-            idx_b = np.random.randint(0, self.current_size, overflow)
-            idx = np.concatenate([idx_a, idx_b])
-        else:
-            idx = np.random.randint(0, self.size, inc)
-        self.current_size = min(self.size, self.current_size + inc)
-        if inc == 1:
-            idx = idx[0]
-        return idx
+        idxes = [random.randint(0, len(self._storage) -1) for _ in range(batch_size)]
+        return self._return_sample(idxes)
 
 
 # HER REPLAY BUFFER
-class HERSample:
-    def __init__(self, replay_strategy='future', n_sample=4, reward_func=None):
-        self.replay_strategy = replay_strategy
-        self.n_sample = n_sample
-        if self.replay_strategy == 'future':
-            self.her_ratio = 1 - (1. / (1 + self.n_sample))
-        else:
-            self.her_ratio = 0
-        self.reward_func = reward_func
+class HindsightExperienceReplay:
+    def __init__(self, replay_buffer, n_sampled_goals, wrapped_env):
 
-    def sample_her_transition(self, episode_batch, batch_transitions):
-        T = episode_batch['actions'].shape[1]
-        rollout_batch_size = episode_batch['actions'].shape[0]
-        batch_size = batch_transitions
-        # select which rollout and timesteps to be used
-        episodes_idxs = np.random.randint(0, rollout_batch_size, batch_size)
-        t_samples = np.random.randint(T, size=batch_size)
-        transitions = {key: episode_batch[key][episodes_idxs, t_samples].copy() for key in episode_batch.keys()}
-        # her indxs
-        her_idx = np.where(np.random.uniform(size=batch_size) < self.her_ratio)
-        future_offset = np.random.uniform(size=batch_size) * (T - t_samples)
-        future_offset = future_offset.astype(int)
-        future_t = (t_samples + 1 + future_offset)[her_idx]
-        # replace goals with achieved goals
-        future_ag = episode_batch['ag'][episodes_idxs[her_idx], future_t]
-        transitions['g'][her_idx] = future_ag
-        # get the params to recompute rewards with env.compute rewards func
-        transitions['r'] = np.expand_dims(self.reward_func(transitions['ag_next'], transitions['g'], None), 1)
-        transitions = {k: transitions[k].reshape(batch_size, *transitions[k].shape[1:]) for k in transitions.keys()}
-        return transitions
+        self.n_sampled_goals = n_sampled_goals
+        self.env = wrapped_env
+        self.replay_buffer = replay_buffer
+        self.episode_transitions = []
 
+    def add(self, obs, action, reward, obs_tp1, done, info):
+        """
+        add a new transition to the buffer
 
+        :param obs: (np array) current obs
+        :param action: ([float]) action taken
+        :param reward: (float) reward got for the action
+        :param obs_tp1: (np.array) next obs after the action
+        :param done: (bool) if the ep is over
+        :param info: (dict) extra info to calculate rewards later
+        """
+        # add data to the current ep
+        self.episode_transitions.append((obs, action, reward, obs_tp1, done, info))
+        if done:
+            # add real and imagined transitions to the replay buffer
+            self._store_episode()
+            # reset ep buffer
+            self.episode_transitions = []
 
+    def _sample_achieved_goal(self, episode_transitions, transition_idx):
+        """
+        sample an achieved goal based on the strategy: currently only future
 
+        :param episode_transitions: (list) current episode
+        :param transition_idx: (int) the transition to start sampling from
+        :return: (np.array) an achieved goal
+        """
+        # sample a goal that was observed during the same ep after the current step --> FUTURE STRAT
+        selected_idx = np.random.choice(np.arange(transition_idx + 1, len(episode_transitions)))
+        selected_transition = episode_transitions[selected_idx]
+        return self.env.convert_obs_to_dict(selected_transition[0])['achieved_goal']
+
+    def _sample_achieved_goals(self, episode_transitions, transition_idx):
+        """
+        sample a batch based on the sampling strategy
+
+        :param episode_transitions: (list) current episode
+        :param transition_idx: (int) the transition to start sampling from
+        :return: (np.array) multiples achieved goals
+        """
+        return [
+            self._sample_achieved_goal(episode_transitions, transition_idx) for _ in range(self.n_sampled_goals)
+        ]
+
+    def _store_episode(self):
+        """
+        Sample new goal and add them in the replay buffer
+        Only called at the end of the ep
+        """
+        # for each transition in the last ep
+        # create a new set of artificial ones
+        for transition_idx, transition in enumerate(self.episode_transitions):
+
+            obs, action, reward, obs_tp1, done, info = transition
+
+            # add the last ep to the replay buffer
+            self.replay_buffer.add(obs, action, reward, obs_tp1, done)
+
+            # if future we cannot sample a goal that is at the last step of the ep
+            if transition_idx == len(self.episode_transitions) - 1:
+                break
+
+            # sample n goals per transitions, n='n_sampled_goals'
+            sampled_goals = self._sample_achieved_goals(self.episode_transitions, transition_idx)
+            # for each sampled goals store a new transition
+            for goal in sampled_goals:
+
+                obs, action, reward, next_obs, done, info = copy.deepcopy(transition)
+                # convert concat obs to dict to update goals
+                obs_d, next_obs_d = map(self.env.convert_obs_to_dict, (obs, next_obs))
+
+                # update desire goal in the transition
+                obs_d['desired_goal'] = goal
+                next_obs_d['desired_goal'] = goal
+
+                # update the reward based on the new goal
+                reward = self.env.compute_reward(next_obs_d['achieved_goal'], goal, info)
+                done = False
+
+                # transform back to array
+                obs, next_obs = map(self.env.convert_dict_to_obs, (obs_d, next_obs_d))
+
+                # add the artificial transition to the replay buffer
+                self.replay_buffer.add(obs, action, reward, next_obs, done)
 
