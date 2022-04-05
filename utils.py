@@ -1,16 +1,13 @@
-import random
-import torch  # Torch version :1.9.0+cpu
-from collections import OrderedDict
-
 import numpy as np
-from gym import spaces
+import os
+import matplotlib.pyplot as plt
 
-np.random.default_rng(14)
-random.seed(14)
-torch.manual_seed(14)
 
-cuda = torch.cuda.is_available()  # check for CUDA
-device = torch.device("cuda" if cuda else "cpu")
+def os_add_pathways():
+    os.environ['PATH'] += r";C:\Users\xavier\.mujoco\mjpro150\bin"
+    os.add_dll_directory("C://Users//xavier//.mujoco//mjpro150//bin")
+    os.environ['PATH'] += r";C:\Users\xavier\.ffmpeg\ffmpeg-2022-02-17-git-2812508086-essentials_build\bin"
+    os.add_dll_directory("C://Program Files (x86)//Microsoft SDKs//MPI")
 
 
 def get_env_params(env):
@@ -18,104 +15,43 @@ def get_env_params(env):
     # close the environment
     params = {'obs': obs['observation'].shape[0], 'goal': obs['desired_goal'].shape[0],
               'action': env.action_space.shape[0], 'action_max': env.action_space.high[0],
-              'max_timesteps': env._max_episode_steps}
+              'max_timesteps': env._max_episode_steps, 'name': env.unwrapped.spec.id}
     return params
 
 
-# https://github.com/hill-a/stable-baselines/blob/master/stable_baselines/her/utils.py
-# Important: gym mixes up ordered and unordered keys
-# and the Dict space may return a different order of keys that the actual one
-KEY_ORDER = ['observation', 'achieved_goal', 'desired_goal']
+def plot_results(success_rate, actor_loss, critic_loss, env_params):
+
+    fig, (ax1, ax2, ax3) = plt.subplots(nrows=1, ncols=3, figsize=(24, 10))
+
+    # Plot accuracy values
+    ax1.plot(success_rate, label='Success rate', color='green', alpha=0.7)
+    ax1.set_title('Success for the {} task'.format(env_params['name']))
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Success in %')
+    ax1.legend()
+
+    ax2.plot(actor_loss, label='Actor loss', color='black', alpha=0.7)
+    ax2.set_title('Actor loss for the {} task'.format(env_params['name']))
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('Actor loss')
+    ax2.legend()
+
+    ax3.plot(critic_loss, label='Critic loss', color='blue', alpha=0.7)
+    ax3.set_title('Critic loss for the {} task'.format(env_params['name']))
+    ax3.set_xlabel('Epoch')
+    ax3.set_ylabel('Critic loss')
+    ax3.legend()
+
+    fig.suptitle(env_params['name'])
+    # save fig
+    if not os.path.exists('./Plots'):
+        os.mkdir('./Plots')
+    plot_path = os.path.join('./Plots', env_params['name'])
+    if not os.path.exists(plot_path):
+        os.mkdir(plot_path)
+    plt.savefig(plot_path + '/' + env_params['name'] + '_plot.png')
+    plt.show()
 
 
-class HERGoalEnvWrapper(object):
-    """
-    A wrapper that allow to use dict observation space (coming from GoalEnv) with
-    the RL algorithms.
-    It assumes that all the spaces of the dict space are of the same type.
-    :param env: (gym.GoalEnv)
-    """
 
-    def __init__(self, env):
-        super(HERGoalEnvWrapper, self).__init__()
-        self.env = env
-        self.metadata = self.env.metadata
-        self.action_space = env.action_space
-        self.spaces = list(env.observation_space.spaces.values())
-        # Check that all spaces are of the same type
-        # (current limitation of the wrapper)
-        space_types = [type(env.observation_space.spaces[key]) for key in KEY_ORDER]
-        assert len(set(space_types)) == 1, "The spaces for goal and observation"\
-                                           " must be of the same type"
 
-        if isinstance(self.spaces[0], spaces.Discrete):
-            self.obs_dim = 1
-            self.goal_dim = 1
-        else:
-            goal_space_shape = env.observation_space.spaces['achieved_goal'].shape
-            self.obs_dim = env.observation_space.spaces['observation'].shape[0]
-            self.goal_dim = goal_space_shape[0]
-
-            if len(goal_space_shape) == 2:
-                assert goal_space_shape[1] == 1, "Only 1D observation spaces are supported yet"
-            else:
-                assert len(goal_space_shape) == 1, "Only 1D observation spaces are supported yet"
-
-        if isinstance(self.spaces[0], spaces.MultiBinary):
-            total_dim = self.obs_dim + 2 * self.goal_dim
-            self.observation_space = spaces.MultiBinary(total_dim)
-
-        elif isinstance(self.spaces[0], spaces.Box):
-            lows = np.concatenate([space.low for space in self.spaces])
-            highs = np.concatenate([space.high for space in self.spaces])
-            self.observation_space = spaces.Box(lows, highs, dtype=np.float32)
-
-        elif isinstance(self.spaces[0], spaces.Discrete):
-            dimensions = [env.observation_space.spaces[key].n for key in KEY_ORDER]
-            self.observation_space = spaces.MultiDiscrete(dimensions)
-
-        else:
-            raise NotImplementedError("{} space is not supported".format(type(self.spaces[0])))
-
-    def convert_dict_to_obs(self, obs_dict):
-        """
-        :param obs_dict: (dict<np.ndarray>)
-        :return: (np.ndarray)
-        """
-        # Note: achieved goal is not removed from the observation
-        # this is helpful to have a revertible transformation
-        if isinstance(self.observation_space, spaces.MultiDiscrete):
-            # Special case for multidiscrete
-            return np.concatenate([[int(obs_dict[key])] for key in KEY_ORDER])
-        return np.concatenate([obs_dict[key] for key in KEY_ORDER])
-
-    def convert_obs_to_dict(self, observations):
-        """
-        Inverse operation of convert_dict_to_obs
-        :param observations: (np.ndarray)
-        :return: (OrderedDict<np.ndarray>)
-        """
-        return OrderedDict([
-            ('observation', observations[:self.obs_dim]),
-            ('achieved_goal', observations[self.obs_dim:self.obs_dim + self.goal_dim]),
-            ('desired_goal', observations[self.obs_dim + self.goal_dim:]),
-        ])
-
-    def step(self, action):
-        obs, reward, done, info = self.env.step(action)
-        return self.convert_dict_to_obs(obs), reward, done, info
-
-    def seed(self, seed=None):
-        return self.env.seed(seed)
-
-    def reset(self):
-        return self.convert_dict_to_obs(self.env.reset())
-
-    def compute_reward(self, achieved_goal, desired_goal, info):
-        return self.env.compute_reward(achieved_goal, desired_goal, info)
-
-    def render(self, mode='human'):
-        return self.env.render(mode)
-
-    def close(self):
-        return self.env.close()

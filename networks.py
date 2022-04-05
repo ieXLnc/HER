@@ -1,55 +1,66 @@
 import numpy as np
 import torch
-from torch import nn
-from torch.nn import functional as F
+import torch.nn as nn
+import torch.nn.functional as F
 
-torch.manual_seed(14)
-np.random.default_rng(14)
-
-cuda = torch.cuda.is_available()  # check for CUDA
-device = torch.device("cuda" if cuda else "cpu")
-print("Job will run on {}".format(device))
+"""
+Create both Actor and Critic network
+Both take obs['obervation'] and observation['desired_goals'] as input, the critic also takes the actions
+"""
 
 
-class Critic(nn.Module):
-    def __init__(self, in_dims, n_acts, fc1, fc2, fc3):
-        super(Critic, self).__init__()
-
-        self.layer1 = nn.Linear(in_dims, fc1)
-        self.layer2 = nn.Linear(fc1 + n_acts, fc2)
-        self.layer3 = nn.Linear(fc2, fc3)
-        self.layer4 = nn.Linear(fc3, 1)
-
-    def forward(self, state, action):
-
-        x = self.layer1(state)
-        x = F.relu(x)
-        x = self.layer2(torch.cat([x, action], 1))
-        x = F.relu(x)
-        x = self.layer3(x)
-        x = F.relu(x)
-        x = self.layer4(x)
-        return x
-
-
+# Creates the Actor class
 class Actor(nn.Module):
-    def __init__(self, in_dims, fc1, fc2, fc3, out_dims):
+    def __init__(self, env_params, fc_shape):
         super(Actor, self).__init__()
+        self.fc = fc_shape
+        self.obs_shape = env_params['obs']
+        self.goal_shape = env_params['goal']
+        self.action_dims = env_params['action']
+        self.action_max = env_params['action_max']
 
-        self.layer1 = nn.Linear(in_dims, fc1)
-        self.layer2 = nn.Linear(fc1, fc2)
-        self.layer3 = nn.Linear(fc2, fc3)
-        self.layer4 = nn.Linear(fc3, out_dims)
+        self.l1 = nn.Linear(self.obs_shape + self.goal_shape, self.fc)
+        self.l2 = nn.Linear(self.fc, self.fc)
+        self.l3 = nn.Linear(self.fc, self.fc)
+        self.l4 = nn.Linear(self.fc, self.action_dims)
 
-    def forward(self, state):
+    def forward(self, obs_g):
+        x = F.relu(self.l1(obs_g))
+        x = F.relu(self.l2(x))
+        x = F.relu(self.l3(x))
+        acts = self.action_max * torch.tanh(self.l4(x))
 
-        x = self.layer1(state)
-        x = F.relu(x)
-        x = self.layer2(x)
-        x = F.relu(x)
-        x = self.layer3(x)
-        x = F.relu(x)
-        x = torch.tanh(self.layer4(x))
-        x = x
+        return acts
 
-        return x
+
+# Create the Critic class
+class Critic(nn.Module):
+    def __init__(self, env_params, fc_shape):
+        super(Critic, self).__init__()
+        self.fc = fc_shape
+        self.obs_shape = env_params['obs']
+        self.goal_shape = env_params['goal']
+        self.action_dims = env_params['action']
+        self.action_max = env_params['action_max']
+
+        self.l1 = nn.Linear(self.obs_shape + self.goal_shape + self.action_dims, self.fc)
+        self.l2 = nn.Linear(self.fc, self.fc)
+        self.l3 = nn.Linear(self.fc, self.fc)
+        self.l4 = nn.Linear(self.fc, 1)
+
+    def forward(self, obs_g, actions):
+        x = torch.cat([obs_g, actions / self.action_max], 1)
+        x = F.relu(self.l1(x))
+        x = F.relu(self.l2(x))
+        x = F.relu(self.l3(x))
+        q_val = self.l4(x)
+
+        return q_val
+
+
+
+
+
+
+
+
