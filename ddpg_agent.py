@@ -1,20 +1,17 @@
 import os
 from torch.optim import Adam
 from networks import Actor, Critic
-from utils import plot_results, os_add_pathways
+from utils import plot_results
 from MPI.mpi_utils import *
 from MPI.normalizer import normalizer
 from buffers import ReplayBuffer, HERSample
-from gym.wrappers.monitoring import video_recorder
-
-os_add_pathways()
 
 
 class DDPGAgent:
     def __init__(self,
                  env,
                  env_params,
-                 fc_shape=64,
+                 fc_shape=256,
                  actor_lr=0.001,
                  critic_lr=0.001,
                  replay_strategy='future',
@@ -23,17 +20,40 @@ class DDPGAgent:
                  clip_obs=200,
                  memory_size=100_00,
                  batch_size=256,
-                 n_epochs=2,
+                 n_epochs=100,
                  n_cycles=50,
-                 rollout=2,
+                 rollout=4,
                  n_update=40,
                  test_rollouts=10,
+                 save_models=5,
                  noise_eps=0.2,
                  random_eps=0.3,
                  gamma=0.98,
                  tau=0.95,
                  action_l2=1
                  ):
+        """
+        env_params: env parameters from function get_params (obs shape, goal shape, action shape, action max and name)
+        fc_shape: layers nodes
+        actor_lr: actor learning rate
+        critic_lr: critic learning rate
+        replay_strategy: choose replay strategy (for now only 'future')
+        replay_k: determine the ratio sample of her idx to take
+        clip_range: clip obs in normalizer
+        clip_obs: clip obs
+        memory_size: memory for the buffer
+        batch_size: batch size to take in learning
+        n_epochs: number of epoch
+        n_cycles: number of time we take the rollouts before learning
+        rollout: number of rollouts in one cycle
+        n_update: number of time to update the net before soft updating the targets
+        test_rollouts: number of test rollouts to evaluate the agent
+        noise_eps: amplitude of gaussian noise
+        random_eps: epsilon to determine how often the action random is added
+        gamma: gamma factor
+        tau: tau for soft updating
+        action_l2: l2 regression on the actor loss
+        """
 
         self.env = env
         self.env_params = env_params
@@ -53,6 +73,7 @@ class DDPGAgent:
         self.rollout = rollout
         self.n_update = n_update
         self.test_rollouts = test_rollouts
+        self.save_models = save_models
         # noise
         self.noise_eps = noise_eps
         self.random_eps = random_eps
@@ -96,69 +117,72 @@ class DDPGAgent:
             'actor_loss': [0],
             'critic_loss': [0],
             'epoch': [],
+            'mean_actor': [],
+            'mean_critic': []
         }
 
     def learn(self):
         # train the algo
         for epoch in range(self.n_epochs):
             for _ in range(self.n_cycles):
-                mb_obs, mb_ag, mb_g, mb_act = [], [], [], []
+                batch_obs, batch_ag, batch_g, batch_act = [], [], [], []
                 for _ in range(self.rollout):
                     # reset rollout
-                    ep_obs, ep_ag, ep_g, ep_act = [], [], [], []
+                    obs, achieved_goals, goals, acts = [], [], [], []
                     # reset env
                     observation = self.env.reset()
-                    obs = observation['observation']
+                    o = observation['observation']
                     ag = observation['achieved_goal']
                     g = observation['desired_goal']
                     # start collecting sample
-                    for t in range(self.env_params['max_timesteps']):
+                    for transition in range(self.env_params['max_timesteps']):
                         with torch.no_grad():
-                            input_obs = self._preprocess_input(obs, g)      # normalize and concat
-                            action = self.get_action(input_obs)             # remove step because gaussian
+                            action = self.get_action(o, g)             # remove step because gaussian
                         # feed action
                         new_observation, _, _, info = self.env.step(action)
-                        obs_new = new_observation['observation']
-                        ag_new = new_observation['achieved_goal']
+                        o_2 = new_observation['observation']
+                        ag_2 = new_observation['achieved_goal']
                         # append rollout
-                        ep_obs.append(obs)
-                        ep_ag.append(ag)
-                        ep_g.append(g)
-                        ep_act.append(action)
+                        obs.append(o)
+                        achieved_goals.append(ag)
+                        goals.append(g)
+                        acts.append(action)
                         # new vals for obs and ag
-                        obs = obs_new
-                        ag = ag_new
+                        o = o_2
+                        ag = ag_2
                     # append the last vals
-                    ep_obs.append(obs)
-                    ep_ag.append(ag)
+                    obs.append(o)
+                    achieved_goals.append(ag)
                     # record cycle
-                    mb_obs.append(ep_obs)
-                    mb_ag.append(ep_ag)
-                    mb_g.append(ep_g)
-                    mb_act.append(ep_act)
+                    batch_obs.append(obs)
+                    batch_ag.append(achieved_goals)
+                    batch_g.append(goals)
+                    batch_act.append(acts)
                 # convert to array
-                mb_obs = np.array(mb_obs)
-                mb_ag = np.array(mb_ag)
-                mb_g = np.array(mb_g)
-                mb_act = np.array(mb_act)
+                batch_obs = np.array(batch_obs)
+                batch_ag = np.array(batch_ag)
+                batch_g = np.array(batch_g)
+                batch_act = np.array(batch_act)
                 # store cycle
-                self.buffer.store_episode([mb_obs, mb_ag, mb_g, mb_act])
-                self._update_normalizer([mb_obs, mb_ag, mb_g, mb_act])
+                self.buffer.store_episode([batch_obs, batch_ag, batch_g, batch_act])
+                # update normalizer with sampled transitions
+                self._update_normalizer([batch_obs, batch_ag, batch_g, batch_act])
                 for _ in range(self.n_update):
                     # train and update the model
                     self.update_models()
                 self.soft_update(self.actor_target, self.actor)
                 self.soft_update(self.critic_target, self.critic)
+
             # eval the agent
             success_rate = self._eval_agent()
             self.log['success'].append(success_rate)
             self.log['epoch'].append(epoch)
-            if MPI.COMM_WORLD.Get_rank() == 0:
-                self.summary()
+            self.summary()
+            if (epoch + 1) % self.save_models == 0:
                 torch.save([self.obs_norm.mean, self.obs_norm.std, self.g_norm.mean, self.g_norm.std,
                             self.actor.state_dict()], self.model_path + '/model.pt')
 
-        plot_results(self.log['success'], self.log['actor_loss'], self.log['critic_loss'], self.env_params)
+        plot_results(self.log['success'], self.log['mean_actor'], self.log['mean_critic'], self.env_params)
 
     def _preprocess_input(self, obs, g):
         # normalize obs and goal
@@ -169,8 +193,9 @@ class DDPGAgent:
         input = torch.tensor(input, dtype=torch.float).unsqueeze(0)
         return input
 
-    def get_action(self, obs_norm_concat):
-        action = self.actor(obs_norm_concat)
+    def get_action(self, o, g):
+        input_obs = self._preprocess_input(o, g)
+        action = self.actor(input_obs)
         action = action.cpu().numpy().squeeze()
         # print('action:', action)
         # add the gaussian
@@ -184,23 +209,23 @@ class DDPGAgent:
         return action
 
     def _update_normalizer(self, episode_batch):
-        mb_obs, mb_ag, mb_g, mb_actions = episode_batch
-        mb_obs_next = mb_obs[:, 1:, :]
-        mb_ag_next = mb_ag[:, 1:, :]
+        obs, achieved_goals, goals, acts = episode_batch
+        obs_next = obs[:, 1:, :]
+        achieved_goals_next = achieved_goals[:, 1:, :]
         # get the number of normalization transitions
-        num_transitions = mb_actions.shape[1]
+        num_transitions = acts.shape[1]
         # create the new buffer to store them
-        buffer_temp = {'obs': mb_obs,
-                       'ag': mb_ag,
-                       'g': mb_g,
-                       'actions': mb_actions,
-                       'obs_next': mb_obs_next,
-                       'ag_next': mb_ag_next,
+        buffer_temp = {'obs': obs,
+                       'ag': achieved_goals,
+                       'g': goals,
+                       'actions': acts,
+                       'obs_next': obs_next,
+                       'ag_next': achieved_goals_next,
                        }
         transitions = self.HER.sample_her_transition(buffer_temp, num_transitions)
         obs, g = transitions['obs'], transitions['g']
         # pre process the obs and g
-        transitions['obs'], transitions['g'] = self._preproc_og(obs, g)
+        transitions['obs'], transitions['g'] = self._preprocess_og(obs, g)
         # update
         self.obs_norm.update(transitions['obs'])
         self.g_norm.update(transitions['g'])
@@ -208,7 +233,7 @@ class DDPGAgent:
         self.obs_norm.recompute_stats()
         self.g_norm.recompute_stats()
 
-    def _preproc_og(self, o, g):
+    def _preprocess_og(self, o, g):
         o = np.clip(o, -self.clip_obs, self.clip_obs)
         g = np.clip(g, -self.clip_obs, self.clip_obs)
         return o, g
@@ -218,8 +243,8 @@ class DDPGAgent:
         transitions = self.buffer.sample(self.batch_size)
         # preprocess the observations and goals
         obs, obs_next, goals = transitions['obs'], transitions['obs_next'], transitions['g']
-        transitions['obs'], transitions['g'] = self._preproc_og(obs, goals)
-        transitions['obs_next'], transitions['g_next'] = self._preproc_og(obs_next, goals)
+        transitions['obs'], transitions['g'] = self._preprocess_og(obs, goals)
+        transitions['obs_next'], transitions['g_next'] = self._preprocess_og(obs_next, goals)
         # start the update
         # norm obs and g
         obs_norm = self.obs_norm.normalize(transitions['obs'])
@@ -247,7 +272,6 @@ class DDPGAgent:
         # the q loss
         real_q_vals = self.critic(inputs_norm_t, actions_t)
         critic_loss = torch.nn.MSELoss()(target_q, real_q_vals)
-        # self.log['critic_loss'].append(critic_loss.detach().cpu().numpy())
         # actor loss
         actions_real = self.actor(inputs_norm_t)
         actor_loss = - self.critic.forward(inputs_norm_t, actions_real).mean()
@@ -275,16 +299,16 @@ class DDPGAgent:
         for _ in range(self.test_rollouts):
             current_success_rate = []
             observation = self.env.reset()
-            obs = observation['observation']
+            o = observation['observation']
             g = observation['desired_goal']
             for _ in range(self.env_params['max_timesteps']):
                 if render:
                     self.env.render()
                 with torch.no_grad():
-                    input_tensor = self._preprocess_input(obs, g)
+                    input_tensor = self._preprocess_input(o, g)
                     action = self.actor(input_tensor).cpu().numpy().squeeze()
                 observation_new, _, _, info = self.env.step(action)
-                obs = observation_new['observation']
+                o = observation_new['observation']
                 g = observation_new['desired_goal']
                 current_success_rate.append(info['is_success'])
             total_success.append(current_success_rate)
@@ -294,8 +318,15 @@ class DDPGAgent:
         return global_success_rate / MPI.COMM_WORLD.Get_size()
 
     def summary(self):
+
+        mean_actor = (np.mean(self.log["actor_loss"][-self.n_update:]))
+        mean_critic = (np.mean(self.log["critic_loss"][-self.n_update:]))
+
         print(f'-------------------------------------------------')
-        print(f'Mean success for epoch {self.log["epoch"][-1]}: {self.log["success"][-1]}')
-        print(f'Actor loss: {self.log["actor_loss"][-1]} | Critic loss: {self.log["critic_loss"][-1]}')
+        print('Mean success for epoch {}: {:.2f}'.format(self.log["epoch"][-1], self.log["success"][-1]))
+        print('Actor loss: {:.4f} | Critic loss: {:.4f}'.format(mean_actor, mean_critic))
+
+        self.log['mean_actor'].append(mean_actor)
+        self.log['mean_critic'].append(mean_critic)
 
 
