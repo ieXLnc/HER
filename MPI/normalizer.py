@@ -3,6 +3,7 @@ import numpy as np
 from mpi4py import MPI
 
 
+# https://github.com/openai/baselines/blob/master/baselines/her/normalizer.py
 class normalizer:
     def __init__(self, size, eps=1e-2, default_clip_range=np.inf):
         self.size = size

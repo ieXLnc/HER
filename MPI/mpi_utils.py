@@ -3,6 +3,7 @@ import numpy as np
 import torch
 
 
+# https://github.com/TianhongDai/hindsight-experience-replay/blob/master/rl_modules/replay_buffer.py
 # sync_networks across the different cores
 def sync_networks(network):
     """
