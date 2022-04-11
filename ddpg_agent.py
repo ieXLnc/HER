@@ -5,6 +5,12 @@ from utils import plot_results
 from MPI.mpi_utils import *
 from MPI.normalizer import normalizer
 from buffers import ReplayBuffer, HERSample
+from datetime import datetime
+
+# set GPU for faster training
+cuda = torch.cuda.is_available()  # check for CUDA
+device = torch.device("cuda" if cuda else "cpu")
+print("Job will run on {}".format(device))
 
 
 class DDPGAgent:
@@ -83,14 +89,14 @@ class DDPGAgent:
         self.action_l2 = action_l2
 
         # create the networks
-        self.actor = Actor(env_params, fc_shape)
-        self.critic = Critic(env_params, fc_shape)
+        self.actor = Actor(env_params, fc_shape).to(device)
+        self.critic = Critic(env_params, fc_shape).to(device)
         # sync them across cpu
         sync_networks(self.actor)
         sync_networks(self.critic)
         # build targets
-        self.actor_target = Actor(env_params, fc_shape)
-        self.critic_target = Critic(env_params, fc_shape)
+        self.actor_target = Actor(env_params, fc_shape).to(device).to(device)
+        self.critic_target = Critic(env_params, fc_shape).to(device).to(device)
         # hard update of the target networks
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target.load_state_dict(self.critic.state_dict())
@@ -178,9 +184,9 @@ class DDPGAgent:
             self.log['success'].append(success_rate)
             self.log['epoch'].append(epoch)
             self.summary()
-            if (epoch + 1) % self.save_models == 0:
+            if MPI.COMM_WORLD.Get_rank() == 0:
                 torch.save([self.obs_norm.mean, self.obs_norm.std, self.g_norm.mean, self.g_norm.std,
-                            self.actor.state_dict()], self.model_path + '/model.pt')
+                            self.actor.state_dict(), self.log], self.model_path + '/model.pt')
 
         plot_results(self.log['success'], self.log['mean_actor'], self.log['mean_critic'], self.env_params)
 
@@ -190,7 +196,7 @@ class DDPGAgent:
         g_norm = self.g_norm.normalize(g)
         # concat
         input = np.concatenate([obs_norm, g_norm])
-        input = torch.tensor(input, dtype=torch.float).unsqueeze(0)
+        input = torch.tensor(input, dtype=torch.float).unsqueeze(0).to(device)
         return input
 
     def get_action(self, o, g):
@@ -255,10 +261,10 @@ class DDPGAgent:
         g_next_norm = self.g_norm.normalize(transitions['g_next'])
         inputs_next_norm = np.concatenate([obs_next_norm, g_next_norm], axis=1)
         # transform all into tensor
-        inputs_norm_t = torch.tensor(inputs_norm, dtype=torch.float)
-        inputs_next_norm_t = torch.tensor(inputs_next_norm, dtype=torch.float)
-        actions_t = torch.tensor(transitions['actions'], dtype=torch.float)
-        rewards_t = torch.tensor(transitions['r'], dtype=torch.float)
+        inputs_norm_t = torch.tensor(inputs_norm, dtype=torch.float).to(device)
+        inputs_next_norm_t = torch.tensor(inputs_next_norm, dtype=torch.float).to(device)
+        actions_t = torch.tensor(transitions['actions'], dtype=torch.float).to(device)
+        rewards_t = torch.tensor(transitions['r'], dtype=torch.float).to(device)
 
         with torch.no_grad():
             next_actions = self.actor_target(inputs_next_norm_t)
@@ -292,7 +298,7 @@ class DDPGAgent:
 
     def soft_update(self, target_net, net):
         for target_params, params in zip(target_net.parameters(), net.parameters()):
-            target_params.data.copy_(self.tau * params.data + (1.0 - self.tau) * target_params.data)
+            target_params.data.copy_(self.tau * target_params.data + (1.0 - self.tau) * params.data)
 
     def _eval_agent(self, render=False):
         total_success = []
@@ -323,8 +329,7 @@ class DDPGAgent:
         mean_critic = (np.mean(self.log["critic_loss"][-self.n_update:]))
 
         print(f'-------------------------------------------------')
-        print('Mean success for epoch {}: {:.2f}'.format(self.log["epoch"][-1], self.log["success"][-1]))
-        print('Actor loss: {:.4f} | Critic loss: {:.4f}'.format(mean_actor, mean_critic))
+        print('[{}] | Epoch {}: {:.2f}     ||     Actor loss: {:.4f} | Critic loss: {:.4f}'.format(datetime.now(), self.log["epoch"][-1], self.log["success"][-1], mean_actor, mean_critic))
 
         self.log['mean_actor'].append(mean_actor)
         self.log['mean_critic'].append(mean_critic)
