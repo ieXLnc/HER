@@ -1,3 +1,4 @@
+import threading
 import numpy as np
 
 
@@ -18,6 +19,9 @@ class ReplayBuffer:
                         'actions': np.empty([self.size, self.T, self.env_params['action']])
                         }
 
+        # thread lock
+        self.lock = threading.Lock()
+
     def store_episode(self, episode_batch):
         mb_obs, mb_ag, mb_g, mb_action = episode_batch
         batch_size = mb_obs.shape[0]
@@ -31,8 +35,9 @@ class ReplayBuffer:
 
     def sample(self, batch_size):
         temp_buffer = {}
-        for key in self.buffers.keys():
-            temp_buffer[key] = self.buffers[key][:self.current_size]    # get all current obs
+        with self.lock:
+            for key in self.buffers.keys():
+                temp_buffer[key] = self.buffers[key][:self.current_size]    # get all current obs
         temp_buffer['obs_next'] = temp_buffer['obs'][:, 1:, :]
         temp_buffer['ag_next'] = temp_buffer['ag'][:, 1:, :]
         # sample transition
@@ -67,7 +72,7 @@ class HERSample:
             self.her_ratio = 0
         self.reward_func = reward_func
 
-    def sample_her_transition(self, episode_batch, batch_transitions):
+    def sample_her_transitions(self, episode_batch, batch_transitions):
         T = episode_batch['actions'].shape[1]                       # T = 50, lenght of ep
         rollout_batch_size = episode_batch['actions'].shape[0]
         # print('roolout batch size', rollout_batch_size)           # get all the rollouts

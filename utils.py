@@ -1,7 +1,4 @@
-import numpy as np
 import os
-import matplotlib.pyplot as plt
-
 
 def os_add_pathways():
     os.environ['PATH'] += r";C:\Users\xavier\.mujoco\mjpro150\bin"
@@ -51,7 +48,6 @@ def plot_results(success_rate, actor_loss, critic_loss, env_params):
         os.mkdir(plot_path)
     plt.savefig(plot_path + '/' + env_params['name'] + '_plot.png')
     plt.show()
-
 
 
 

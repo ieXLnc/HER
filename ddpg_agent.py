@@ -1,9 +1,9 @@
 import os
 from torch.optim import Adam
+# from Copied_HER.models import actor, critic
 from networks import Actor, Critic
-from utils import plot_results
-from MPI.mpi_utils import *
-from MPI.normalizer import normalizer
+from HER.mpi_utils import *
+from HER.normalizer import normalizer
 from buffers import ReplayBuffer, HERSample
 from datetime import datetime
 
@@ -24,11 +24,11 @@ class DDPGAgent:
                  replay_k=4,
                  clip_range=5,
                  clip_obs=200,
-                 memory_size=100_00,
+                 memory_size=1_000_000,
                  batch_size=256,
-                 n_epochs=100,
+                 n_epochs=200,
                  n_cycles=50,
-                 rollout=4,
+                 rollout=2,
                  n_update=40,
                  test_rollouts=10,
                  save_models=5,
@@ -36,7 +36,7 @@ class DDPGAgent:
                  random_eps=0.3,
                  gamma=0.98,
                  tau=0.95,
-                 action_l2=1
+                 action_l2=1.0
                  ):
         """
         env_params: env parameters from function get_params (obs shape, goal shape, action shape, action max and name)
@@ -89,14 +89,14 @@ class DDPGAgent:
         self.action_l2 = action_l2
 
         # create the networks
-        self.actor = Actor(env_params, fc_shape).to(device)
-        self.critic = Critic(env_params, fc_shape).to(device)
+        self.actor = Actor(env_params, fc_shape)
+        self.critic = Critic(env_params, fc_shape)
         # sync them across cpu
         sync_networks(self.actor)
         sync_networks(self.critic)
         # build targets
-        self.actor_target = Actor(env_params, fc_shape).to(device).to(device)
-        self.critic_target = Critic(env_params, fc_shape).to(device).to(device)
+        self.actor_target = Actor(env_params, fc_shape)
+        self.critic_target = Critic(env_params, fc_shape)
         # hard update of the target networks
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target.load_state_dict(self.critic.state_dict())
@@ -105,9 +105,9 @@ class DDPGAgent:
         self.critic_optimizer = Adam(self.critic.parameters(), lr=self.critic_lr)
         # HER and ReplayBuffer
         self.HER = HERSample(self.replay_strategy, self.replay_k, self.env.compute_reward)
-        self.buffer = ReplayBuffer(env_params, self.memory_size, self.HER.sample_her_transition)
+        self.buffer = ReplayBuffer(self.env_params, self.memory_size, self.HER.sample_her_transitions)
         # Create normalizer
-        self.obs_norm = normalizer(size=env_params['obs'], default_clip_range=self.clip_range)
+        self.o_norm = normalizer(size=env_params['obs'], default_clip_range=self.clip_range)
         self.g_norm = normalizer(size=env_params['goal'], default_clip_range=self.clip_range)
         # create the saving dict for the model
         if MPI.COMM_WORLD.Get_rank() == 0:
@@ -120,8 +120,8 @@ class DDPGAgent:
         # Create log
         self.log = {
             'success': [],
-            'actor_loss': [0],
-            'critic_loss': [0],
+            'actor_loss': [],
+            'critic_loss': [],
             'epoch': [],
             'mean_actor': [],
             'mean_critic': []
@@ -149,16 +149,16 @@ class DDPGAgent:
                         o_2 = new_observation['observation']
                         ag_2 = new_observation['achieved_goal']
                         # append rollout
-                        obs.append(o)
-                        achieved_goals.append(ag)
-                        goals.append(g)
-                        acts.append(action)
+                        obs.append(o.copy())
+                        achieved_goals.append(ag.copy())
+                        goals.append(g.copy())
+                        acts.append(action.copy())
                         # new vals for obs and ag
                         o = o_2
                         ag = ag_2
                     # append the last vals
-                    obs.append(o)
-                    achieved_goals.append(ag)
+                    obs.append(o.copy())
+                    achieved_goals.append(ag.copy())
                     # record cycle
                     batch_obs.append(obs)
                     batch_ag.append(achieved_goals)
@@ -173,35 +173,35 @@ class DDPGAgent:
                 self.buffer.store_episode([batch_obs, batch_ag, batch_g, batch_act])
                 # update normalizer with sampled transitions
                 self._update_normalizer([batch_obs, batch_ag, batch_g, batch_act])
+                # part of mine
                 for _ in range(self.n_update):
                     # train and update the model
                     self.update_models()
                 self.soft_update(self.actor_target, self.actor)
                 self.soft_update(self.critic_target, self.critic)
-
             # eval the agent
             success_rate = self._eval_agent()
             self.log['success'].append(success_rate)
             self.log['epoch'].append(epoch)
             self.summary()
             if MPI.COMM_WORLD.Get_rank() == 0:
-                torch.save([self.obs_norm.mean, self.obs_norm.std, self.g_norm.mean, self.g_norm.std,
+                torch.save([self.o_norm.mean, self.o_norm.std, self.g_norm.mean, self.g_norm.std,
                             self.actor.state_dict(), self.log], self.model_path + '/model.pt')
 
-        plot_results(self.log['success'], self.log['mean_actor'], self.log['mean_critic'], self.env_params)
+        # plot_results(self.log['success'], self.log['mean_actor'], self.log['mean_critic'], self.env_params)
 
     def _preprocess_input(self, obs, g):
         # normalize obs and goal
-        obs_norm = self.obs_norm.normalize(obs)
+        obs_norm = self.o_norm.normalize(obs)
         g_norm = self.g_norm.normalize(g)
         # concat
         input = np.concatenate([obs_norm, g_norm])
-        input = torch.tensor(input, dtype=torch.float).unsqueeze(0).to(device)
+        input = torch.tensor(input, dtype=torch.float).unsqueeze(0)
         return input
 
     def get_action(self, o, g):
-        input_obs = self._preprocess_input(o, g)
-        action = self.actor(input_obs)
+        input_tensor = self._preprocess_input(o, g)
+        action = self.actor(input_tensor)
         action = action.cpu().numpy().squeeze()
         # print('action:', action)
         # add the gaussian
@@ -228,15 +228,15 @@ class DDPGAgent:
                        'obs_next': obs_next,
                        'ag_next': achieved_goals_next,
                        }
-        transitions = self.HER.sample_her_transition(buffer_temp, num_transitions)
+        transitions = self.HER.sample_her_transitions(buffer_temp, num_transitions)
         obs, g = transitions['obs'], transitions['g']
         # pre process the obs and g
         transitions['obs'], transitions['g'] = self._preprocess_og(obs, g)
         # update
-        self.obs_norm.update(transitions['obs'])
+        self.o_norm.update(transitions['obs'])
         self.g_norm.update(transitions['g'])
         # recompute the stats
-        self.obs_norm.recompute_stats()
+        self.o_norm.recompute_stats()
         self.g_norm.recompute_stats()
 
     def _preprocess_og(self, o, g):
@@ -244,6 +244,7 @@ class DDPGAgent:
         g = np.clip(g, -self.clip_obs, self.clip_obs)
         return o, g
 
+    # update the network
     def update_models(self):
         # sample episode online
         transitions = self.buffer.sample(self.batch_size)
@@ -253,18 +254,18 @@ class DDPGAgent:
         transitions['obs_next'], transitions['g_next'] = self._preprocess_og(obs_next, goals)
         # start the update
         # norm obs and g
-        obs_norm = self.obs_norm.normalize(transitions['obs'])
+        obs_norm = self.o_norm.normalize(transitions['obs'])
         g_norm = self.g_norm.normalize(transitions['g'])
         inputs_norm = np.concatenate([obs_norm, g_norm], axis=1)
         # norm next obs and next g
-        obs_next_norm = self.obs_norm.normalize(transitions['obs_next'])
+        obs_next_norm = self.o_norm.normalize(transitions['obs_next'])
         g_next_norm = self.g_norm.normalize(transitions['g_next'])
         inputs_next_norm = np.concatenate([obs_next_norm, g_next_norm], axis=1)
         # transform all into tensor
-        inputs_norm_t = torch.tensor(inputs_norm, dtype=torch.float).to(device)
-        inputs_next_norm_t = torch.tensor(inputs_next_norm, dtype=torch.float).to(device)
-        actions_t = torch.tensor(transitions['actions'], dtype=torch.float).to(device)
-        rewards_t = torch.tensor(transitions['r'], dtype=torch.float).to(device)
+        inputs_norm_t = torch.tensor(inputs_norm, dtype=torch.float)
+        inputs_next_norm_t = torch.tensor(inputs_next_norm, dtype=torch.float)
+        actions_t = torch.tensor(transitions['actions'], dtype=torch.float)
+        rewards_t = torch.tensor(transitions['r'], dtype=torch.float)
 
         with torch.no_grad():
             next_actions = self.actor_target(inputs_next_norm_t)
@@ -274,17 +275,14 @@ class DDPGAgent:
             target_q = target_q.detach()
             # clip the q value
             clip_return = 1 / (1 - self.gamma)
-            target_q = torch.clamp(target_q, -clip_return, 0)  # clip target used to train critic as in the paper
+            target_q = torch.clamp(target_q, -clip_return, 0)       # clip target used to train critic as in the paper
         # the q loss
         real_q_vals = self.critic(inputs_norm_t, actions_t)
-        critic_loss = torch.nn.MSELoss()(target_q, real_q_vals)
+        critic_loss = torch.nn.MSELoss()(target_q, real_q_vals)     # (target_q - real_q_vals).pow(2).mean()
         # actor loss
         actions_real = self.actor(inputs_norm_t)
-        actor_loss = - self.critic.forward(inputs_norm_t, actions_real).mean()
+        actor_loss = -self.critic(inputs_norm_t, actions_real).mean()
         actor_loss += self.action_l2 * (actions_real / self.env_params['action_max']).pow(2).mean()  # L2 reg
-        # record vals
-        self.log['actor_loss'].append(actor_loss.detach().cpu().numpy())
-        self.log['critic_loss'].append(critic_loss.detach().cpu().numpy())
         # update the actor
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
@@ -295,10 +293,13 @@ class DDPGAgent:
         critic_loss.backward()
         sync_grads(self.critic)
         self.critic_optimizer.step()
+        # record vals
+        self.log['actor_loss'].append(actor_loss.detach().cpu().numpy())
+        self.log['critic_loss'].append(critic_loss.detach().cpu().numpy())
 
     def soft_update(self, target_net, net):
-        for target_params, params in zip(target_net.parameters(), net.parameters()):
-            target_params.data.copy_(self.tau * target_params.data + (1.0 - self.tau) * params.data)
+        for target_param, param in zip(target_net.parameters(), net.parameters()):
+            target_param.data.copy_(self.tau * target_param.data + (1 - self.tau) * param.data)
 
     def _eval_agent(self, render=False):
         total_success = []
@@ -328,8 +329,9 @@ class DDPGAgent:
         mean_actor = (np.mean(self.log["actor_loss"][-self.n_update:]))
         mean_critic = (np.mean(self.log["critic_loss"][-self.n_update:]))
 
-        print(f'-------------------------------------------------')
-        print('[{}] | Epoch {}: {:.2f}     ||     Actor loss: {:.4f} | Critic loss: {:.4f}'.format(datetime.now(), self.log["epoch"][-1], self.log["success"][-1], mean_actor, mean_critic))
+        # print(f'-------------------------------------------------')
+        print('[{}] | Epoch {}: {:.2f}     ||     Actor loss: {:.4f} | Critic loss: {:.4f}'
+              .format(datetime.now(), self.log["epoch"][-1], self.log["success"][-1], mean_actor, mean_critic))
 
         self.log['mean_actor'].append(mean_actor)
         self.log['mean_critic'].append(mean_critic)

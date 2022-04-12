@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,22 +23,6 @@ class Actor(nn.Module):
         self.l3 = nn.Linear(self.fc, self.fc)
         self.l4 = nn.Linear(self.fc, self.action_dims)
 
-        f1 = 1. / np.sqrt(self.l1.weight.data.size()[0])
-        nn.init.uniform_(self.l1.weight.data, -f1, f1)
-        nn.init.uniform_(self.l1.bias.data, -f1, f1)
-
-        f2 = 1. / np.sqrt(self.l2.weight.data.size()[0])
-        nn.init.uniform_(self.l2.weight.data, -f2, f2)
-        nn.init.uniform_(self.l2.bias.data, -f2, f2)
-
-        f3 = 1. / np.sqrt(self.l3.weight.data.size()[0])
-        nn.init.uniform_(self.l3.weight.data, -f3, f3)
-        nn.init.uniform_(self.l3.bias.data, -f3, f3)
-
-        f4 = 0.003  # specified in the paper
-        nn.init.uniform_(self.l4.weight.data, -f4, f4)
-        nn.init.uniform_(self.l4.bias.data, -f4, f4)
-
     def forward(self, obs_g):
         x = F.relu(self.l1(obs_g))
         x = F.relu(self.l2(x))
@@ -64,24 +47,8 @@ class Critic(nn.Module):
         self.l3 = nn.Linear(self.fc, self.fc)
         self.l4 = nn.Linear(self.fc, 1)
 
-        f1 = 1. / np.sqrt(self.l1.weight.data.size()[0])
-        nn.init.uniform_(self.l1.weight.data, -f1, f1)
-        nn.init.uniform_(self.l1.bias.data, -f1, f1)
-
-        f2 = 1. / np.sqrt(self.l2.weight.data.size()[0])
-        nn.init.uniform_(self.l2.weight.data, -f2, f2)
-        nn.init.uniform_(self.l2.bias.data, -f2, f2)
-
-        f3 = 1. / np.sqrt(self.l3.weight.data.size()[0])
-        nn.init.uniform_(self.l3.weight.data, -f3, f3)
-        nn.init.uniform_(self.l3.bias.data, -f3, f3)
-
-        f4 = 0.003  # specified in the paper
-        nn.init.uniform_(self.l4.weight.data, -f4, f4)
-        nn.init.uniform_(self.l4.bias.data, -f4, f4)
-
     def forward(self, obs_g, actions):
-        x = torch.cat([obs_g, actions / self.action_max], 1)
+        x = torch.cat([obs_g, actions / self.action_max], dim=1)
         x = F.relu(self.l1(x))
         x = F.relu(self.l2(x))
         x = F.relu(self.l3(x))
