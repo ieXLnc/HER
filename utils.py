@@ -1,4 +1,5 @@
 import os
+import matplotlib.pyplot as plt
 
 def os_add_pathways():
     os.environ['PATH'] += r";C:\Users\xavier\.mujoco\mjpro150\bin"

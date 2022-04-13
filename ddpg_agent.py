@@ -17,26 +17,7 @@ class DDPGAgent:
     def __init__(self,
                  env,
                  env_params,
-                 fc_shape=256,
-                 actor_lr=0.001,
-                 critic_lr=0.001,
-                 replay_strategy='future',
-                 replay_k=4,
-                 clip_range=5,
-                 clip_obs=200,
-                 memory_size=1_000_000,
-                 batch_size=256,
-                 n_epochs=200,
-                 n_cycles=50,
-                 rollout=2,
-                 n_update=40,
-                 test_rollouts=10,
-                 save_models=5,
-                 noise_eps=0.2,
-                 random_eps=0.3,
-                 gamma=0.98,
-                 tau=0.95,
-                 action_l2=1.0
+                 params_dict
                  ):
         """
         env_params: env parameters from function get_params (obs shape, goal shape, action shape, action max and name)
@@ -65,38 +46,40 @@ class DDPGAgent:
         self.env_params = env_params
 
         # hyperparams
-        self.actor_lr = actor_lr
-        self.critic_lr = critic_lr
-        self.replay_strategy = replay_strategy
-        self.replay_k = replay_k
+        self.actor_lr = params_dict['actor_lr']
+        self.critic_lr = params_dict['critic_lr']
+        self.replay_strategy = params_dict['replay_strategy']
+        self.replay_k = params_dict['replay_k']
 
-        self.clip_range = clip_range
-        self.clip_obs = clip_obs
-        self.memory_size = memory_size
-        self.batch_size = batch_size
-        self.n_epochs = n_epochs
-        self.n_cycles = n_cycles
-        self.rollout = rollout
-        self.n_update = n_update
-        self.test_rollouts = test_rollouts
-        self.save_models = save_models
+        self.clip_range = params_dict['clip_range']
+        self.clip_obs = params_dict['clip_obs']
+        self.memory_size = params_dict['memory_size']
+        self.batch_size = params_dict['batch_size']
+        self.n_epochs = params_dict['n_epochs']
+        self.n_cycles = params_dict['n_cycles']
+        self.rollout = params_dict['rollout']
+        self.n_update = params_dict['n_update']
+        self.test_rollouts = params_dict['test_rollouts']
+        self.save_models = params_dict['save_models']
         # noise
-        self.noise_eps = noise_eps
-        self.random_eps = random_eps
+        self.noise_eps = params_dict['noise_eps']
+        self.random_eps = params_dict['random_eps']
 
-        self.gamma = gamma
-        self.tau = tau
-        self.action_l2 = action_l2
+        self.gamma = params_dict['gamma']
+        self.tau = params_dict['tau']
+        self.action_l2 = params_dict['action_l2']
+
+        self.fc = params_dict['fc_shape']
 
         # create the networks
-        self.actor = Actor(env_params, fc_shape)
-        self.critic = Critic(env_params, fc_shape)
+        self.actor = Actor(env_params, self.fc)
+        self.critic = Critic(env_params, self.fc)
         # sync them across cpu
         sync_networks(self.actor)
         sync_networks(self.critic)
         # build targets
-        self.actor_target = Actor(env_params, fc_shape)
-        self.critic_target = Critic(env_params, fc_shape)
+        self.actor_target = Actor(env_params, self.fc)
+        self.critic_target = Critic(env_params, self.fc)
         # hard update of the target networks
         self.actor_target.load_state_dict(self.actor.state_dict())
         self.critic_target.load_state_dict(self.critic.state_dict())

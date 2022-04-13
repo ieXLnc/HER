@@ -50,7 +50,7 @@ if __name__ == '__main__':
     os.environ['IN_MPI'] = '1'
 
     # train model
-    ddpg_agent = DDPGAgent(env, env_params)
+    ddpg_agent = DDPGAgent(env, env_params, params_models)
     ddpg_agent.learn()
 
 
