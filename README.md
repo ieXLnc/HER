@@ -12,3 +12,11 @@ In training.
 
 
 ![FetchReach-v1__612](https://user-images.githubusercontent.com/63811972/162220135-8938584f-f235-4614-9c1e-f1a21b7b3777.gif)
+
+
+### FetchPush-v1
+
+![FetchPush-v1_plot](https://user-images.githubusercontent.com/63811972/163142976-9c43b341-1cc2-48d1-9819-17985eb1af1f.png)
+
+
+
