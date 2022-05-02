@@ -16,8 +16,25 @@ In training.
 
 ### FetchPush-v1
 
-![FetchPush-v1_plot](https://user-images.githubusercontent.com/63811972/163142976-9c43b341-1cc2-48d1-9819-17985eb1af1f.png)
+![FetchPush-v1_plot](https://user-images.githubusercontent.com/63811972/166290850-66cd6458-06d3-4f59-a168-5853b7ab4948.png)
 
 
-![FetchPush-v1__542](https://user-images.githubusercontent.com/63811972/163143602-f7489d59-289c-47d1-a09c-032c4b6bc63b.gif)
+![FetchPush-v1__47](https://user-images.githubusercontent.com/63811972/166290539-73b3f000-6ea2-4a79-99cc-4eea7566384f.gif)
+
+
+### FetchPickAndPlace-v1
+
+![FetchPickAndPlace-v1_plot](https://user-images.githubusercontent.com/63811972/166290757-04fac344-fcbc-4ba3-b84e-b50f8ec7c045.png)
+
+
+![FetchPickAndPlace-v1__553](https://user-images.githubusercontent.com/63811972/166290614-f12f171c-e364-463b-9dc8-0d0562024066.gif)
+
+
+### FetchSlide-v1
+
+
+![FetchSlide-v1_plot](https://user-images.githubusercontent.com/63811972/166290695-75956486-eb11-49c0-9ae0-a1d33b33fc98.png)
+
+
+![FetchSlide-v1__466](https://user-images.githubusercontent.com/63811972/166290659-7f3bdae1-b197-45cc-923d-11526bc567ff.gif)
 
